@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"os"
 	"regexp"
@@ -142,7 +141,8 @@ type Elasticsearch struct {
 	catMasterResponseTokens []string
 	isMaster                bool
 	SlowLogsMetrics         bool
-	SlowLogsPath            string
+	SlowSearchLogsPath      string
+	SlowIndexingLogsPath    string
 }
 
 // NewElasticsearch return a new instance of Elasticsearch
@@ -209,10 +209,13 @@ func (e *Elasticsearch) Gather(acc telegraf.Accumulator) error {
 
 			if e.SlowLogsMetrics {
 				// get slow logs
-				if e.SlowLogsPath == "" {
-					panic("Please specify the slow log")
+				if e.SlowSearchLogsPath == "" {
+					acc.AddError(fmt.Errorf("Provide slow_search_logs_path in telegraf.conf"))
+				} else if e.SlowIndexingLogsPath == "" {
+					acc.AddError(fmt.Errorf("Provide slow_indexing_logs_path in telegraf.conf"))
+				} else {
+					e.getSlowLogsCount(acc)
 				}
-				e.getSlowLogsCount(acc)
 			}
 
 			// Always gather node states
@@ -246,24 +249,36 @@ func (e *Elasticsearch) Gather(acc telegraf.Accumulator) error {
 }
 
 func (e *Elasticsearch) getSlowLogsCount(acc telegraf.Accumulator) {
-	file, err := os.Open(e.SlowLogsPath)
+	slowSearchLogFile, err := os.Open(e.SlowSearchLogsPath)
 	if err != nil {
-		log.Fatal(err)
+		acc.AddError(fmt.Errorf(err.Error()))
 	}
+	defer slowSearchLogFile.Close()
+	slowIndexingLogFile, err := os.Open(e.SlowIndexingLogsPath)
+	if err != nil {
+		acc.AddError(fmt.Errorf(err.Error()))
+	}
+	defer slowIndexingLogFile.Close()
 	measurementTime := time.Now()
 	timeBeforeInterval := measurementTime.Add(-time.Minute).Format("2006-01-02 15:04")
-	var count int
-	scanner := bufio.NewScanner(file)
+	var countSearch, countIndexing int
+	scannerSearch := bufio.NewScanner(slowSearchLogFile)
+	scannerIndexing := bufio.NewScanner(slowIndexingLogFile)
 	r, err := regexp.Compile(timeBeforeInterval)
 	if err != nil {
 		panic(err)
 	}
-	for scanner.Scan() {
-		if r.MatchString(scanner.Text()) {
-			count++
+	for scannerSearch.Scan() {
+		if r.MatchString(scannerSearch.Text()) {
+			countSearch++
 		}
 	}
-	acc.AddFields("slow_logs", map[string]interface{}{"slow_log_count": count}, map[string]string{"name": "test"}, measurementTime)
+	for scannerIndexing.Scan() {
+		if r.MatchString(scannerSearch.Text()) {
+			countIndexing++
+		}
+	}
+	acc.AddFields("elasticsearch_slow_logs", map[string]interface{}{"slow_search_log_count": countSearch, "slow_indexing_log_count": countIndexing}, map[string]string{"name": "slow_logs"}, measurementTime)
 }
 
 func (e *Elasticsearch) createHttpClient() (*http.Client, error) {
