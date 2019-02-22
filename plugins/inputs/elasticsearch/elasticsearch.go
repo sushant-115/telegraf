@@ -1,10 +1,13 @@
 package elasticsearch
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -135,10 +138,11 @@ type Elasticsearch struct {
 	ClusterStatsOnlyFromMaster bool
 	NodeStats                  []string
 	tls.ClientConfig
-
 	client                  *http.Client
 	catMasterResponseTokens []string
 	isMaster                bool
+	SlowLogsMetrics         bool
+	SlowLogsPath            string
 }
 
 // NewElasticsearch return a new instance of Elasticsearch
@@ -203,6 +207,14 @@ func (e *Elasticsearch) Gather(acc telegraf.Accumulator) error {
 				}
 			}
 
+			if e.SlowLogsMetrics {
+				// get slow logs
+				if e.SlowLogsPath == "" {
+					panic("Please specify the slow log")
+				}
+				e.getSlowLogsCount(acc)
+			}
+
 			// Always gather node states
 			if err := e.gatherNodeStats(url, acc); err != nil {
 				acc.AddError(fmt.Errorf(mask.ReplaceAllString(err.Error(), "http(s)://XXX:XXX@")))
@@ -231,6 +243,27 @@ func (e *Elasticsearch) Gather(acc telegraf.Accumulator) error {
 
 	wg.Wait()
 	return nil
+}
+
+func (e *Elasticsearch) getSlowLogsCount(acc telegraf.Accumulator) {
+	file, err := os.Open(e.SlowLogsPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	measurementTime := time.Now()
+	timeBeforeInterval := measurementTime.Add(-time.Minute).Format("2006-01-02 15:04")
+	var count int
+	scanner := bufio.NewScanner(file)
+	r, err := regexp.Compile(timeBeforeInterval)
+	if err != nil {
+		panic(err)
+	}
+	for scanner.Scan() {
+		if r.MatchString(scanner.Text()) {
+			count++
+		}
+	}
+	acc.AddFields("slow_logs", map[string]interface{}{"slow_log_count": count}, map[string]string{"name": "test"}, measurementTime)
 }
 
 func (e *Elasticsearch) createHttpClient() (*http.Client, error) {
